@@ -82,17 +82,17 @@ font:
   - file:
       type: gfonts
       family: Manrope
-      weight: 500
+      weight: 600
     id: f_artist
-    size: 20
+    size: 24
     glyphsets:
       - GF_Latin_Core
   - file:
       type: gfonts
       family: Manrope
-      weight: 400
+      weight: 500
     id: f_album
-    size: 16
+    size: 18
     glyphsets:
       - GF_Latin_Core
   - file:
@@ -1036,10 +1036,10 @@ lvgl:
                   text_font: montserrat_48
                   text_color: 0xFFFFFF
                   text: ""
-        - label:
+                - label:
             id: lbl_title
             align: TOP_MID
-            y: 326
+            y: 322
             width: 440
             text_align: CENTER
             long_mode: SCROLL_CIRCULAR
@@ -1049,34 +1049,34 @@ lvgl:
         - label:
             id: lbl_artist
             align: TOP_MID
-            y: 362
+            y: 358
             width: 440
             text_align: CENTER
             long_mode: SCROLL_CIRCULAR
             text_font: f_artist
-            text_color: 0xAAAAAA
+            text_color: 0xCCCCCC
             text: ""
         - label:
             id: lbl_album
             align: TOP_MID
-            y: 388
+            y: 390
             width: 440
             text_align: CENTER
             long_mode: SCROLL_CIRCULAR
             text_font: f_album
-            text_color: 0x666666
+            text_color: 0x8C8C8C
             text: ""
         - label:
             id: lbl_pos
             x: 30
-            y: 418
+            y: 422
             text_font: f_time
             text_color: 0x888888
             text: "0:00"
         - label:
             id: lbl_duration
             x: 380
-            y: 418
+            y: 422
             width: 70
             text_align: RIGHT
             text_font: f_time
@@ -1085,7 +1085,7 @@ lvgl:
         - bar:
             id: bar_progress
             x: 30
-            y: 446
+            y: 450
             width: 420
             height: 8
             min_value: 0
