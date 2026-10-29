@@ -1,0 +1,1215 @@
+esphome:
+  name: nowplaying
+  friendly_name: nowplaying
+  on_boot:
+    priority: -100
+    then:
+      - delay: 6s
+      - script.execute: resync
+      - script.execute: refresh_clock
+      - script.execute: update_display
+      - delay: 10s
+      - script.execute: resync
+
+esp32:
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+
+debug:
+
+api:
+  encryption:
+    key: !secret nowplaying_api_key
+
+ota:
+  - platform: esphome
+    on_begin:
+      - light.turn_off:
+          id: display_backlight
+          transition_length: 0s
+      - lambda: "id(display_backlight).loop();"
+
+wifi:
+  ssid: !secret nowplaying_wifi_ssid
+  password: !secret nowplaying_wifi_password
+  ap:
+    ssid: Artwork Fallback Hotspot
+    password: !secret nowplaying_ap_password
+
+captive_portal:
+
+time:
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      - script.execute: resync
+      - script.execute: refresh_clock
+      - script.execute: update_display
+      - script.execute: maybe_weather
+    on_time:
+      - cron: "0 * * * * *"
+        then:
+          - script.execute: refresh_clock
+          - if:
+              condition:
+                lambda: 'return !id(show_art);'
+              then:
+                - script.execute: update_display
+          - script.execute: maybe_weather
+
+http_request:
+  timeout: 15s
+  watchdog_timeout: 20s
+  verify_ssl: false
+
+font:
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 800
+    id: f_title
+    size: 28
+    glyphsets:
+      - GF_Latin_Core
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 500
+    id: f_artist
+    size: 20
+    glyphsets:
+      - GF_Latin_Core
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 400
+    id: f_album
+    size: 16
+    glyphsets:
+      - GF_Latin_Core
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 500
+    id: f_time
+    size: 14
+    glyphsets:
+      - GF_Latin_Core
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 200
+    id: f_clock
+    size: 110
+    glyphs: "0123456789:-"
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 500
+    id: f_date
+    size: 22
+    glyphsets:
+      - GF_Latin_Core
+    glyphs: "°"
+  - file:
+      type: gfonts
+      family: Manrope
+      weight: 500
+    id: f_temp
+    size: 46
+    glyphsets:
+      - GF_Latin_Core
+    glyphs: "°"
+  - file: "fonts/materialdesignicons-webfont.ttf"
+    id: f_wx_icon
+    size: 48
+    glyphs:
+      - "\U000F0599"
+      - "\U000F0594"
+      - "\U000F0595"
+      - "\U000F0F31"
+      - "\U000F0590"
+      - "\U000F0591"
+      - "\U000F0597"
+      - "\U000F0596"
+      - "\U000F0598"
+      - "\U000F067F"
+      - "\U000F067E"
+
+spi:
+  - id: lcd_spi
+    clk_pin: GPIO48
+    mosi_pin: GPIO47
+
+i2c:
+  id: touchscreen_bus
+  sda: GPIO19
+  scl:
+    number: 45
+    ignore_strapping_warning: true
+
+output:
+  - platform: ledc
+    id: backlight_output
+    pin: GPIO38
+    frequency: 150Hz
+    min_power: 0.01
+    zero_means_zero: true
+
+light:
+  - platform: monochromatic
+    name: Backlight
+    id: display_backlight
+    output: backlight_output
+    restore_mode: ALWAYS_ON
+    default_transition_length: 1s
+
+display:
+  - platform: st7701s
+    id: tft_display
+    dimensions:
+      width: 480
+      height: 480
+    spi_mode: MODE3
+    data_rate: 2MHz
+    color_order: RGB
+    invert_colors: False
+    cs_pin: 39
+    de_pin: 18
+    hsync_pin: 16
+    vsync_pin: 17
+    pclk_pin: 21
+    pclk_frequency: 12MHz
+    pclk_inverted: False
+    hsync_pulse_width: 8
+    hsync_front_porch: 10
+    hsync_back_porch: 20
+    vsync_pulse_width: 8
+    vsync_front_porch: 10
+    vsync_back_porch: 10
+    update_interval: never
+    auto_clear_enabled: False
+    init_sequence:
+      - 1
+      - [0xFF, 0x77, 0x01, 0x00, 0x00, 0x10]
+      - [0xCD, 0x00]
+    data_pins:
+      red: [11, 12, 13, 14, 0]
+      green: [8, 20, 3, 46, 9, 10]
+      blue: [4, 5, 6, 7, 15]
+
+touchscreen:
+  - platform: gt911
+    id: tft_touch
+    display: tft_display
+
+globals:
+  - id: wiim_addr
+    type: std::string
+    initial_value: '""'
+  - id: last_art
+    type: std::string
+    initial_value: '""'
+  - id: last_title
+    type: std::string
+    initial_value: '""'
+  - id: title_hex
+    type: std::string
+    initial_value: '""'
+  - id: need_meta
+    type: bool
+    initial_value: 'false'
+  - id: meta_fresh
+    type: bool
+    initial_value: 'false'
+  - id: meta_ready
+    type: bool
+    initial_value: 'false'
+  - id: meta_art_ok
+    type: bool
+    initial_value: 'false'
+  - id: meta_title
+    type: std::string
+    initial_value: '""'
+  - id: meta_artist
+    type: std::string
+    initial_value: '""'
+  - id: meta_album
+    type: std::string
+    initial_value: '""'
+  - id: meta_art
+    type: std::string
+    initial_value: '""'
+  - id: media_state
+    type: std::string
+    initial_value: '""'
+  - id: is_playing
+    type: bool
+    initial_value: 'false'
+  - id: show_art
+    type: bool
+    initial_value: 'false'
+  - id: is_dark
+    type: bool
+    initial_value: 'false'
+  - id: manual_off
+    type: bool
+    initial_value: 'false'
+  - id: peek
+    type: bool
+    initial_value: 'false'
+  - id: track_pos
+    type: int
+    initial_value: '0'
+  - id: track_dur
+    type: int
+    initial_value: '0'
+  - id: upd_ts
+    type: double
+    initial_value: '0'
+  - id: track_change_ts
+    type: double
+    initial_value: '0'
+  - id: direct_ms
+    type: uint32_t
+    initial_value: '0'
+  - id: tap_count
+    type: int
+    initial_value: '0'
+  - id: tap_zone
+    type: int
+    initial_value: '0'
+  - id: res_count
+    type: int
+    initial_value: '0'
+  - id: res_zone
+    type: int
+    initial_value: '0'
+  - id: idle_taps
+    type: int
+    initial_value: '0'
+  - id: idle_res
+    type: int
+    initial_value: '0'
+  - id: wx_valid
+    type: bool
+    initial_value: 'false'
+  - id: wx_ok
+    type: bool
+    initial_value: 'false'
+  - id: wx_now_rain
+    type: bool
+    initial_value: 'false'
+  - id: wx_temp
+    type: float
+    initial_value: '0'
+  - id: wx_hi
+    type: float
+    initial_value: '0'
+  - id: wx_lo
+    type: float
+    initial_value: '0'
+  - id: wx_rain_idx
+    type: int
+    initial_value: '-1'
+  - id: wx_hour
+    type: int
+    initial_value: '0'
+  - id: wx_code
+    type: int
+    initial_value: '0'
+  - id: wx_day
+    type: bool
+    initial_value: 'true'
+  - id: wx_ms
+    type: uint32_t
+    initial_value: '0'
+
+image:
+  - platform: online_image
+    id: album_art
+    url: "https://i.scdn.co/image/ab67616d0000b2733e0f00112d68d1293ed46381"
+    format: JPEG
+    type: RGB565
+    resize: 300x300
+    update_interval: never
+    on_download_finished:
+      - lvgl.image.update:
+          id: lv_art
+          src: album_art
+    on_error:
+      - logger.log: "Album art download failed"
+
+script:
+  - id: refresh_progress
+    then:
+      - lvgl.label.update:
+          id: lbl_pos
+          text: !lambda |-
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d:%02d", id(track_pos) / 60, id(track_pos) % 60);
+            return std::string(buf);
+      - lvgl.label.update:
+          id: lbl_duration
+          text: !lambda |-
+            int rem = id(track_dur) - id(track_pos);
+            if (rem < 0) rem = 0;
+            char buf[16];
+            snprintf(buf, sizeof(buf), "-%d:%02d", rem / 60, rem % 60);
+            return std::string(buf);
+      - lvgl.bar.update:
+          id: bar_progress
+          value: !lambda |-
+            int d = id(track_dur);
+            if (d <= 0) return 0;
+            int v = id(track_pos) * 1000 / d;
+            if (v < 0) v = 0;
+            return v > 1000 ? 1000 : v;
+
+  - id: load_art
+    parameters:
+      u: std::string
+    then:
+      - if:
+          condition:
+            lambda: 'return u.rfind("http", 0) == 0 && u != id(last_art);'
+          then:
+            - lambda: 'id(last_art) = u;'
+            - online_image.set_url:
+                id: album_art
+                url: !lambda |-
+                  std::string s = u;
+                  size_t p = s.find("ab67616d0000b273");
+                  if (p != std::string::npos) s.replace(p, 16, "ab67616d00001e02");
+                  return s;
+
+  - id: fetch_meta
+    mode: single
+    then:
+      - lambda: 'id(meta_fresh) = false;'
+      - http_request.get:
+          url: !lambda 'return "https://" + id(wiim_addr) + "/httpapi.asp?command=getMetaInfo";'
+          capture_response: true
+          max_response_buffer_size: 4096
+          on_response:
+            then:
+              - lambda: |-
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    JsonObject m = root["metaData"].as<JsonObject>();
+                    if (m.isNull()) return false;
+                    const char *ti = m["title"] | "";
+                    const char *ar = m["artist"] | "";
+                    const char *su = m["subtitle"] | "";
+                    const char *al = m["album"] | "";
+                    const char *im = m["albumArtURI"] | "";
+                    std::string title = ti;
+                    std::string artist = ar;
+                    if (artist.empty() || artist == "unknow" || artist == "unknown") artist = su;
+                    if (title.empty()) return false;
+                    id(meta_title) = title;
+                    id(meta_artist) = artist;
+                    id(meta_album) = al;
+                    id(meta_art) = im;
+                    id(meta_art_ok) = (im[0] != 0);
+                    id(meta_ready) = true;
+                    id(meta_fresh) = true;
+                    return true;
+                  });
+          on_error:
+            - logger.log: "WiiM metadata fetch failed"
+      - if:
+          condition:
+            lambda: 'return id(meta_fresh);'
+          then:
+            - lvgl.label.update:
+                id: lbl_title
+                text: !lambda 'return id(meta_title);'
+            - lvgl.label.update:
+                id: lbl_artist
+                text: !lambda 'return id(meta_artist);'
+            - lvgl.label.update:
+                id: lbl_album
+                text: !lambda 'return id(meta_album);'
+            - script.execute:
+                id: load_art
+                u: !lambda 'return id(meta_art);'
+
+  - id: poll_wiim
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: |-
+              const std::string &a = id(wiim_addr);
+              return !a.empty() && a != "unknown" && a != "unavailable";
+          then:
+            - http_request.get:
+                url: !lambda 'return "https://" + id(wiim_addr) + "/httpapi.asp?command=getPlayerStatus";'
+                capture_response: true
+                max_response_buffer_size: 2048
+                on_response:
+                  then:
+                    - lambda: |-
+                        json::parse_json(body, [](JsonObject root) -> bool {
+                          const char *cp = root["curpos"] | "";
+                          const char *tl = root["totlen"] | "";
+                          const char *ti = root["Title"] | "";
+                          std::string th = ti;
+                          if (th != id(title_hex)) {
+                            id(title_hex) = th;
+                            if (!th.empty()) id(need_meta) = true;
+                          }
+                          if (cp[0] == 0) return false;
+                          long c = atol(cp);
+                          long t = atol(tl);
+                          id(track_pos) = (int) (c / 1000);
+                          if (t > 0) id(track_dur) = (int) (t / 1000);
+                          id(direct_ms) = millis();
+                          return true;
+                        });
+                    - script.execute: refresh_progress
+                on_error:
+                  - logger.log: "WiiM direct poll failed"
+            - if:
+                condition:
+                  lambda: 'return id(need_meta);'
+                then:
+                  - lambda: 'id(need_meta) = false;'
+                  - script.execute: fetch_meta
+
+  - id: refresh_weather
+    then:
+      - lvgl.label.update:
+          id: lbl_wx_icon
+          text: !lambda |-
+            if (!id(wx_valid)) return std::string("");
+            int c = id(wx_code);
+            bool day = id(wx_day);
+            const char *g = "\U000F0590";
+            if (c == 0 || c == 1) g = day ? "\U000F0599" : "\U000F0594";
+            else if (c == 2) g = day ? "\U000F0595" : "\U000F0F31";
+            else if (c == 3) g = "\U000F0590";
+            else if (c == 45 || c == 48) g = "\U000F0591";
+            else if (c == 66 || c == 67) g = "\U000F067F";
+            else if (c == 65 || c == 82) g = "\U000F0596";
+            else if ((c >= 51 && c <= 57) || (c >= 61 && c <= 64) || c == 80 || c == 81) g = "\U000F0597";
+            else if ((c >= 71 && c <= 77) || c == 85 || c == 86) g = "\U000F0598";
+            else if (c >= 95) g = "\U000F067E";
+            return std::string(g);
+      - lvgl.label.update:
+          id: lbl_wx_temp
+          text: !lambda |-
+            if (!id(wx_valid)) return std::string("");
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%d°", (int) lroundf(id(wx_temp)));
+            return std::string(buf);
+      - lvgl.label.update:
+          id: lbl_wx_hilo
+          text: !lambda |-
+            if (!id(wx_valid)) return std::string("");
+            char buf[40];
+            snprintf(buf, sizeof(buf), "High %d°   Low %d°", (int) lroundf(id(wx_hi)), (int) lroundf(id(wx_lo)));
+            return std::string(buf);
+      - lvgl.label.update:
+          id: lbl_wx_rain
+          text: !lambda |-
+            if (!id(wx_valid)) return std::string("");
+            if (id(wx_now_rain)) return std::string("Raining now");
+            int idx = id(wx_rain_idx);
+            if (idx < 0) return std::string("");
+            if (idx == id(wx_hour)) return std::string("Rain expected soon");
+            int h = idx % 24;
+            int h12 = h % 12;
+            if (h12 == 0) h12 = 12;
+            char buf[40];
+            snprintf(buf, sizeof(buf), "Rain %saround %d%s", idx >= 24 ? "tomorrow " : "", h12, h < 12 ? "am" : "pm");
+            return std::string(buf);
+
+  - id: fetch_weather
+    mode: single
+    then:
+      - lambda: |-
+          id(wx_ms) = millis();
+          id(wx_ok) = false;
+      - http_request.get:
+          url: !secret weather_api_url
+          capture_response: true
+          max_response_buffer_size: 8192
+          on_response:
+            then:
+              - lambda: |-
+                  json::parse_json(body, [](JsonObject root) -> bool {
+                    JsonObject cur = root["current"].as<JsonObject>();
+                    JsonObject dly = root["daily"].as<JsonObject>();
+                    JsonObject hrl = root["hourly"].as<JsonObject>();
+                    if (cur.isNull() || dly.isNull()) return false;
+                    float temp = cur["temperature_2m"] | -99.0f;
+                    if (temp < -90.0f) return false;
+                    JsonArray hi = dly["temperature_2m_max"].as<JsonArray>();
+                    JsonArray lo = dly["temperature_2m_min"].as<JsonArray>();
+                    if (hi.isNull() || lo.isNull() || hi.size() < 1 || lo.size() < 1) return false;
+                    float prec = cur["precipitation"] | 0.0f;
+                    int code = cur["weather_code"] | 0;
+                    int isday = cur["is_day"] | 1;
+                    id(wx_temp) = temp;
+                    id(wx_hi) = hi[0] | 0.0f;
+                    id(wx_lo) = lo[0] | 0.0f;
+                    id(wx_code) = code;
+                    id(wx_day) = (isday != 0);
+                    id(wx_now_rain) = (prec >= 0.1f);
+                    int idx = -1;
+                    auto t = id(ha_time).now();
+                    JsonArray pp = hrl["precipitation_probability"].as<JsonArray>();
+                    if (t.is_valid() && !pp.isNull()) {
+                      id(wx_hour) = t.hour;
+                      for (int k = 0; k < 24; k++) {
+                        int i = t.hour + k;
+                        if (i >= (int) pp.size()) break;
+                        int p = pp[i] | 0;
+                        if (p >= 50) {
+                          idx = i;
+                          break;
+                        }
+                      }
+                    }
+                    id(wx_rain_idx) = idx;
+                    id(wx_valid) = true;
+                    id(wx_ok) = true;
+                    return true;
+                  });
+          on_error:
+            - logger.log: "Weather fetch failed"
+      - if:
+          condition:
+            lambda: 'return id(wx_ok);'
+          then:
+            - script.execute: refresh_weather
+          else:
+            - lambda: 'id(wx_ms) = millis() - 1500000UL;'
+
+  - id: maybe_weather
+    then:
+      - if:
+          condition:
+            lambda: |-
+              if (id(show_art) || id(is_dark)) return false;
+              if (!id(ha_time).now().is_valid()) return false;
+              if (id(wx_ms) == 0) return true;
+              return (millis() - id(wx_ms)) > 1800000UL;
+          then:
+            - script.execute: fetch_weather
+
+  - id: refresh_clock
+    then:
+      - lvgl.label.update:
+          id: lbl_clock
+          text: !lambda |-
+            auto t = id(ha_time).now();
+            if (!t.is_valid()) return std::string("--:--");
+            return t.strftime("%H:%M");
+      - lvgl.label.update:
+          id: lbl_date
+          text: !lambda |-
+            auto t = id(ha_time).now();
+            if (!t.is_valid()) return std::string("");
+            char buf[48];
+            snprintf(buf, sizeof(buf), "%s %d %s", t.strftime("%A").c_str(), t.day_of_month, t.strftime("%B").c_str());
+            return std::string(buf);
+
+  - id: update_display
+    mode: restart
+    then:
+      - lambda: |-
+          const std::string &s = id(media_state);
+          bool art = (s == "playing" || s == "paused" || s == "buffering");
+          auto t = id(ha_time).now();
+          bool night = t.is_valid() && t.hour >= 1 && t.hour < 6;
+          id(show_art) = art;
+          id(is_dark) = !art && (id(manual_off) || (night && !id(peek)));
+      - if:
+          condition:
+            lambda: 'return id(show_art);'
+          then:
+            - lvgl.page.show: main_page
+            - light.turn_on:
+                id: display_backlight
+                brightness: !lambda 'return id(media_state) == "paused" ? 0.3f : 1.0f;'
+          else:
+            - lvgl.page.show: idle_page
+            - if:
+                condition:
+                  lambda: 'return id(is_dark);'
+                then:
+                  - light.turn_off: display_backlight
+                else:
+                  - light.turn_on:
+                      id: display_backlight
+                      brightness: 60%
+                  - script.execute: maybe_weather
+
+  - id: idle_delay
+    mode: restart
+    parameters:
+      st: std::string
+    then:
+      - delay: 5s
+      - lambda: |-
+          id(media_state) = st;
+          id(is_playing) = false;
+      - script.execute: update_display
+
+  - id: peek_timer
+    mode: restart
+    then:
+      - delay: 30s
+      - lambda: 'id(peek) = false;'
+      - script.execute: update_display
+
+  - id: idle_tap_resolver
+    mode: restart
+    then:
+      - delay: 400ms
+      - lambda: |-
+          id(idle_res) = id(idle_taps);
+          id(idle_taps) = 0;
+      - if:
+          condition:
+            lambda: 'return id(idle_res) >= 2;'
+          then:
+            - lambda: 'id(manual_off) = true;'
+            - script.execute: update_display
+
+  - id: show_gesture
+    mode: restart
+    parameters:
+      sym: std::string
+    then:
+      - lvgl.label.update:
+          id: lbl_gesture
+          text: !lambda 'return sym;'
+      - lvgl.widget.update:
+          id: gesture_overlay
+          opa: 40%
+      - lvgl.widget.show: gesture_overlay
+      - delay: 80ms
+      - lvgl.widget.update:
+          id: gesture_overlay
+          opa: 100%
+      - delay: 450ms
+      - lvgl.widget.update:
+          id: gesture_overlay
+          opa: 66%
+      - delay: 100ms
+      - lvgl.widget.update:
+          id: gesture_overlay
+          opa: 33%
+      - delay: 100ms
+      - lvgl.widget.hide: gesture_overlay
+
+  - id: resync
+    mode: restart
+    then:
+      - delay: 300ms
+      - lambda: |-
+          if (id(direct_ms) != 0 && (millis() - id(direct_ms)) < 15000) return;
+          float p = id(ha_position).state;
+          auto t = id(ha_time).now();
+          double pos = 0;
+          bool stale = id(track_change_ts) > 0 && id(upd_ts) < id(track_change_ts) - 3;
+          if (stale) {
+            if (id(is_playing) && t.is_valid()) {
+              pos = (double) t.timestamp - id(track_change_ts);
+            }
+            if (pos < 0) pos = 0;
+          } else {
+            if (isnan(p)) return;
+            pos = p;
+            if (id(is_playing) && id(upd_ts) > 0) {
+              if (!t.is_valid()) return;
+              double el = (double) t.timestamp - id(upd_ts);
+              if (el >= 0 && el < 3600) pos += el;
+            }
+          }
+          if (id(track_dur) > 0 && pos > id(track_dur)) pos = id(track_dur);
+          id(track_pos) = (int) pos;
+      - script.execute: refresh_progress
+
+  - id: do_prev
+    then:
+      - homeassistant.action:
+          action: media_player.media_previous_track
+          data:
+            entity_id: media_player.wiim_pro_2
+
+  - id: do_prev_twice
+    mode: single
+    then:
+      - script.execute: do_prev
+      - delay: 300ms
+      - script.execute: do_prev
+
+  - id: do_next
+    then:
+      - homeassistant.action:
+          action: media_player.media_next_track
+          data:
+            entity_id: media_player.wiim_pro_2
+
+  - id: do_playpause
+    then:
+      - homeassistant.action:
+          action: media_player.media_play_pause
+          data:
+            entity_id: media_player.wiim_pro_2
+
+  - id: tap_resolver
+    mode: restart
+    then:
+      - delay: 400ms
+      - lambda: |-
+          id(res_count) = id(tap_count);
+          id(res_zone) = id(tap_zone);
+          id(tap_count) = 0;
+      - if:
+          condition:
+            lambda: 'return id(res_count) == 1;'
+          then:
+            - script.execute: do_playpause
+      - if:
+          condition:
+            lambda: 'return id(res_count) >= 2 && id(res_zone) == 2;'
+          then:
+            - script.execute:
+                id: show_gesture
+                sym: "\uF051"
+            - script.execute: do_next
+      - if:
+          condition:
+            lambda: 'return id(res_count) == 2 && id(res_zone) == 1;'
+          then:
+            - script.execute:
+                id: show_gesture
+                sym: "\uF021"
+            - script.execute: do_prev
+      - if:
+          condition:
+            lambda: 'return id(res_count) >= 3 && id(res_zone) == 1;'
+          then:
+            - script.execute:
+                id: show_gesture
+                sym: "\uF048"
+            - script.execute: do_prev_twice
+
+interval:
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(is_playing) && id(track_dur) > 0;'
+          then:
+            - lambda: |-
+                if (id(track_pos) < id(track_dur)) id(track_pos)++;
+            - script.execute: refresh_progress
+  - interval: 10s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(show_art);'
+          then:
+            - script.execute: poll_wiim
+
+text_sensor:
+  - platform: homeassistant
+    id: ha_wiim_ip
+    entity_id: input_text.wiim_ip
+    internal: true
+    on_value:
+      - lambda: 'id(wiim_addr) = x;'
+
+  - platform: homeassistant
+    id: ha_state
+    entity_id: media_player.wiim_pro_2
+    internal: true
+    on_value:
+      - if:
+          condition:
+            lambda: 'return x == "paused";'
+          then:
+            - lvgl.widget.show: pause_overlay
+          else:
+            - lvgl.widget.hide: pause_overlay
+      - if:
+          condition:
+            lambda: 'return x == "playing" || x == "paused" || x == "buffering";'
+          then:
+            - script.stop: idle_delay
+            - lambda: |-
+                id(media_state) = x;
+                id(is_playing) = (x == "playing");
+            - script.execute: update_display
+          else:
+            - lambda: 'id(is_playing) = false;'
+            - script.execute:
+                id: idle_delay
+                st: !lambda 'return x;'
+      - script.execute: resync
+
+  - platform: homeassistant
+    id: ha_title
+    entity_id: media_player.wiim_pro_2
+    attribute: media_title
+    internal: true
+    on_value:
+      - lambda: |-
+          bool direct = id(direct_ms) != 0 && (millis() - id(direct_ms)) < 15000;
+          if (!id(last_title).empty() && id(last_title) != x) {
+            auto t = id(ha_time).now();
+            if (t.is_valid()) id(track_change_ts) = (double) t.timestamp;
+            if (!direct) id(track_pos) = 0;
+          }
+          id(last_title) = x;
+      - if:
+          condition:
+            lambda: 'return !(id(meta_ready) && id(direct_ms) != 0 && (millis() - id(direct_ms)) < 15000);'
+          then:
+            - lvgl.label.update:
+                id: lbl_title
+                text: !lambda 'return x;'
+      - script.execute: refresh_progress
+      - script.execute: resync
+
+  - platform: homeassistant
+    id: ha_artist
+    entity_id: media_player.wiim_pro_2
+    attribute: media_artist
+    internal: true
+    on_value:
+      - if:
+          condition:
+            lambda: 'return !(id(meta_ready) && id(direct_ms) != 0 && (millis() - id(direct_ms)) < 15000);'
+          then:
+            - lvgl.label.update:
+                id: lbl_artist
+                text: !lambda 'return x;'
+
+  - platform: homeassistant
+    id: ha_album
+    entity_id: media_player.wiim_pro_2
+    attribute: media_album_name
+    internal: true
+    on_value:
+      - if:
+          condition:
+            lambda: 'return !(id(meta_ready) && id(direct_ms) != 0 && (millis() - id(direct_ms)) < 15000);'
+          then:
+            - lvgl.label.update:
+                id: lbl_album
+                text: !lambda 'return x;'
+
+  - platform: homeassistant
+    id: ha_pos_updated
+    entity_id: media_player.wiim_pro_2
+    attribute: media_position_updated_at
+    internal: true
+    on_value:
+      - lambda: |-
+          int Y, M, D, h, m;
+          float s;
+          if (sscanf(x.c_str(), "%d-%d-%dT%d:%d:%f", &Y, &M, &D, &h, &m, &s) == 6) {
+            int y = Y - (M <= 2 ? 1 : 0);
+            int era = (y >= 0 ? y : y - 399) / 400;
+            unsigned yoe = (unsigned) (y - era * 400);
+            unsigned doy = (153 * (M + (M > 2 ? -3 : 9)) + 2) / 5 + D - 1;
+            unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+            long days = (long) era * 146097L + (long) doe - 719468L;
+            id(upd_ts) = (double) days * 86400.0 + h * 3600.0 + m * 60.0 + s;
+          }
+      - script.execute: resync
+
+  - platform: homeassistant
+    id: ha_picture
+    entity_id: media_player.wiim_pro_2
+    attribute: entity_picture
+    internal: true
+    on_value:
+      - if:
+          condition:
+            lambda: 'return !(id(meta_art_ok) && id(direct_ms) != 0 && (millis() - id(direct_ms)) < 15000);'
+          then:
+            - script.execute:
+                id: load_art
+                u: !lambda 'return x;'
+
+sensor:
+  - platform: homeassistant
+    id: ha_duration
+    entity_id: media_player.wiim_pro_2
+    attribute: media_duration
+    internal: true
+    on_value:
+      - lambda: 'id(track_dur) = (int) x;'
+      - script.execute: refresh_progress
+
+  - platform: homeassistant
+    id: ha_position
+    entity_id: media_player.wiim_pro_2
+    attribute: media_position
+    internal: true
+    on_value:
+      - script.execute: resync
+
+lvgl:
+  pages:
+    - id: main_page
+      bg_color: 0x000000
+      widgets:
+        - image:
+            id: lv_art
+            src: album_art
+            align: TOP_MID
+            y: 16
+            radius: 20
+            clip_corner: true
+        - obj:
+            id: pause_overlay
+            x: 195
+            y: 121
+            width: 90
+            height: 90
+            hidden: true
+            clickable: false
+            radius: 45
+            bg_color: 0x000000
+            bg_opa: 60%
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            scrollable: false
+            widgets:
+              - obj:
+                  x: 25
+                  y: 26
+                  width: 12
+                  height: 38
+                  radius: 4
+                  bg_color: 0xFFFFFF
+                  border_width: 0
+                  shadow_width: 0
+                  clickable: false
+              - obj:
+                  x: 53
+                  y: 26
+                  width: 12
+                  height: 38
+                  radius: 4
+                  bg_color: 0xFFFFFF
+                  border_width: 0
+                  shadow_width: 0
+                  clickable: false
+        - obj:
+            id: gesture_overlay
+            x: 195
+            y: 121
+            width: 90
+            height: 90
+            hidden: true
+            clickable: false
+            radius: 45
+            bg_color: 0x000000
+            bg_opa: 60%
+            border_width: 0
+            shadow_width: 0
+            pad_all: 0
+            scrollable: false
+            widgets:
+              - label:
+                  id: lbl_gesture
+                  align: CENTER
+                  text_font: montserrat_48
+                  text_color: 0xFFFFFF
+                  text: ""
+        - label:
+            id: lbl_title
+            align: TOP_MID
+            y: 326
+            width: 440
+            text_align: CENTER
+            long_mode: SCROLL_CIRCULAR
+            text_font: f_title
+            text_color: 0xFFFFFF
+            text: ""
+        - label:
+            id: lbl_artist
+            align: TOP_MID
+            y: 362
+            width: 440
+            text_align: CENTER
+            long_mode: SCROLL_CIRCULAR
+            text_font: f_artist
+            text_color: 0xAAAAAA
+            text: ""
+        - label:
+            id: lbl_album
+            align: TOP_MID
+            y: 388
+            width: 440
+            text_align: CENTER
+            long_mode: SCROLL_CIRCULAR
+            text_font: f_album
+            text_color: 0x666666
+            text: ""
+        - label:
+            id: lbl_pos
+            x: 30
+            y: 418
+            text_font: f_time
+            text_color: 0x888888
+            text: "0:00"
+        - label:
+            id: lbl_duration
+            x: 380
+            y: 418
+            width: 70
+            text_align: RIGHT
+            text_font: f_time
+            text_color: 0x888888
+            text: ""
+        - bar:
+            id: bar_progress
+            x: 30
+            y: 446
+            width: 420
+            height: 8
+            min_value: 0
+            max_value: 1000
+            value: 0
+            radius: 4
+            bg_color: 0x2A2A2E
+            indicator:
+              radius: 4
+              bg_color: 0x4F6BFF
+              bg_grad_color: 0xB16CFF
+              bg_grad_dir: HOR
+        - obj:
+            x: 0
+            y: 0
+            width: 112
+            height: 480
+            bg_opa: TRANSP
+            border_width: 0
+            shadow_width: 0
+            radius: 0
+            pad_all: 0
+            scrollable: false
+            on_click:
+              - lambda: |-
+                  id(tap_count)++;
+                  id(tap_zone) = 1;
+              - script.execute: tap_resolver
+        - obj:
+            x: 112
+            y: 0
+            width: 368
+            height: 480
+            bg_opa: TRANSP
+            border_width: 0
+            shadow_width: 0
+            radius: 0
+            pad_all: 0
+            scrollable: false
+            on_click:
+              - lambda: |-
+                  id(tap_count)++;
+                  id(tap_zone) = 2;
+              - script.execute: tap_resolver
+
+    - id: idle_page
+      bg_color: 0x000000
+      widgets:
+        - label:
+            id: lbl_clock
+            align: CENTER
+            y: -70
+            text_align: CENTER
+            text_font: f_clock
+            text_color: 0x8A8A8A
+            text: "--:--"
+        - label:
+            id: lbl_date
+            align: CENTER
+            y: 18
+            width: 440
+            text_align: CENTER
+            text_font: f_date
+            text_color: 0x555555
+            text: ""
+        - label:
+            id: lbl_wx_icon
+            align: CENTER
+            x: -52
+            y: 72
+            width: 70
+            text_align: CENTER
+            text_font: f_wx_icon
+            text_color: 0xCCCCCC
+            text: ""
+        - label:
+            id: lbl_wx_temp
+            align: CENTER
+            x: 38
+            y: 72
+            width: 150
+            text_align: CENTER
+            text_font: f_temp
+            text_color: 0x9A9A9A
+            text: ""
+        - label:
+            id: lbl_wx_hilo
+            align: CENTER
+            y: 118
+            width: 440
+            text_align: CENTER
+            text_font: f_date
+            text_color: 0x5A5A5A
+            text: ""
+        - label:
+            id: lbl_wx_rain
+            align: CENTER
+            y: 158
+            width: 440
+            text_align: CENTER
+            text_font: f_artist
+            text_color: 0x5F7FB5
+            text: ""
+        - obj:
+            x: 0
+            y: 0
+            width: 480
+            height: 480
+            bg_opa: TRANSP
+            border_width: 0
+            shadow_width: 0
+            radius: 0
+            pad_all: 0
+            scrollable: false
+            on_click:
+              - if:
+                  condition:
+                    lambda: 'return id(is_dark);'
+                  then:
+                    - lambda: |-
+                        id(manual_off) = false;
+                        id(peek) = true;
+                    - script.execute: update_display
+                    - script.execute: peek_timer
+                  else:
+                    - lambda: 'id(idle_taps)++;'
+                    - script.execute: idle_tap_resolver
